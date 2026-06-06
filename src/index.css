@@ -1,0 +1,70 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base resets ───────────────────────────────────────── */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html {
+    font-family: 'Outfit', sans-serif;
+    background-color: #0a0e1a;
+    color: #e2e8f0;
+    overflow: hidden;
+  }
+
+  body {
+    margin: 0;
+    padding: 0;
+    /* iOS safe-area insets */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  /* Custom scrollbar for chat area */
+  .chat-scroll::-webkit-scrollbar {
+    width: 4px;
+  }
+  .chat-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .chat-scroll::-webkit-scrollbar-thumb {
+    background: rgba(0, 229, 200, 0.2);
+    border-radius: 999px;
+  }
+  .chat-scroll::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 229, 200, 0.4);
+  }
+
+  /* Noise texture overlay */
+  .noise-overlay::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+    background-repeat: repeat;
+    background-size: 128px 128px;
+    pointer-events: none;
+    z-index: 0;
+  }
+}
+
+@layer components {
+  /* Gradient border effect for avatar ring */
+  .avatar-ring {
+    background: conic-gradient(
+      from 0deg,
+      #00e5c8,
+      #006b5e 25%,
+      transparent 50%,
+      #006b5e 75%,
+      #00e5c8
+    );
+  }
+}

@@ -42,6 +42,18 @@
     background: rgba(0, 229, 200, 0.4);
   }
 
+  /* Canvas touch-action to prevent page scroll on iOS */
+  #avatar-canvas canvas {
+    touch-action: none;
+  }
+
+  /* Landscape short-viewport guard */
+  @media (orientation: landscape) and (max-height: 500px) {
+    #avatar-canvas {
+      max-height: 35vh !important;
+    }
+  }
+
   /* Noise texture overlay */
   .noise-overlay::before {
     content: '';

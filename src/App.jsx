@@ -1,76 +1,247 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect, useRef } from 'react'
 import Header from './components/Header'
-import AvatarCanvas from './components/AvatarCanvas'
+import VideoAvatar from './components/VideoAvatar'
 import ChatHistory from './components/ChatHistory'
 import ChatInput from './components/ChatInput'
+import InstallBanner from './components/InstallBanner'
+import { streamChat, estimateHistoryTokens, pruneHistory, API_URL } from './lib/api'
+import { getSessionId, loadMessages, saveMessages } from './lib/db'
 
-/**
- * App — Root layout for the UNEFA Virtual Assistant PWA.
- *
- * Layout structure (top → bottom, no page scroll):
- *   ┌──────────────────────────┐
- *   │  Header / Role Selector  │  fixed height
- *   ├──────────────────────────┤
- *   │                          │
- *   │     AvatarCanvas (3D)    │  flex-1 (fills remaining)
- *   │                          │
- *   ├──────────────────────────┤
- *   │  ChatHistory (scroll)    │  constrained max-height
- *   ├──────────────────────────┤
- *   │  ChatInput               │  fixed height
- *   └──────────────────────────┘
- */
+const SYSTEM_PROMPTS = {
+  E: 'Eres MarIA, el asistente virtual academico de la UNEFA Nucleo Apure. El usuario es un estudiante. Responde de forma clara, breve y util sobre reglamentos, calendario academico, tramites y vida universitaria.',
+  O: 'Eres MarIA, el asistente virtual academico de la UNEFA Nucleo Apure. El usuario es personal docente o administrativo. Responde de forma clara, breve y util.',
+}
+
+function generateId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
 export default function App() {
-  // ── State ─────────────────────────────────────────────
-  const [role, setRole] = useState('E') // 'E' = Estudiante | 'O' = Otro Personal
+  const [role, setRole] = useState('E')
   const [messages, setMessages] = useState([])
+  const messagesRef = useRef(messages)
+  const [avatarState, setAvatarState] = useState('IDLE')
+  const [isOnline, setIsOnline] = useState(navigator.onLine)
+  const [serverStatus, setServerStatus] = useState('unknown')
+  const abortCtrlRef = useRef(null)
+  const streamingRef = useRef(false)
+  const assistantTextLengthRef = useRef(0)
 
-  // ── Handlers ──────────────────────────────────────────
+  // Keep ref in sync with state
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
+
+  // Restore messages on mount
+  useEffect(() => {
+    loadMessages(getSessionId()).then((msgs) => {
+      if (msgs.length > 0) setMessages(msgs)
+    })
+  }, [])
+
+  // Persist messages on change
+  useEffect(() => {
+    saveMessages(getSessionId(), messages)
+  }, [messages])
+
+  // Online/offline events
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true)
+    const onOffline = () => setIsOnline(false)
+    window.addEventListener('online', onOnline)
+    window.addEventListener('offline', onOffline)
+    return () => {
+      window.removeEventListener('online', onOnline)
+      window.removeEventListener('offline', onOffline)
+    }
+  }, [])
+
+  // Server health polling
+  useEffect(() => {
+    const checkServer = async () => {
+      const ctrl = new AbortController()
+      const t = setTimeout(() => ctrl.abort(), 8000)
+      const start = performance.now()
+      try {
+        await fetch(API_URL, { method: 'GET', signal: ctrl.signal })
+        clearTimeout(t)
+        const elapsed = performance.now() - start
+        if (elapsed < 3000) setServerStatus('online')
+        else setServerStatus('slow')
+      } catch {
+        clearTimeout(t)
+        setServerStatus('offline')
+      }
+    }
+    checkServer()
+    const id = setInterval(checkServer, 15000)
+    return () => clearInterval(id)
+  }, [])
+
+  const handleStop = useCallback(() => {
+    if (abortCtrlRef.current) {
+      abortCtrlRef.current.abort()
+      abortCtrlRef.current = null
+    }
+    streamingRef.current = false
+    assistantTextLengthRef.current = 0
+    setAvatarState('IDLE')
+  }, [])
+
   const handleSendMessage = useCallback(
-    (text) => {
-      // Build payload that will be sent to the backend in the future
-      const payload = {
-        mensaje: text,
-        rol: role,
-        timestamp: new Date().toISOString(),
+    async (text) => {
+      if (!isOnline || serverStatus === 'offline') return
+
+      // Abort any existing stream
+      if (abortCtrlRef.current) {
+        abortCtrlRef.current.abort()
       }
 
-      // Log the exact JSON payload to the console
-      console.log('📤 Payload para backend:', JSON.stringify(payload, null, 2))
+      const userMsg = { role: 'user', text, id: generateId() }
+      setMessages((prev) => [...prev, userMsg])
+      setAvatarState('THINKING')
+      streamingRef.current = true
+      assistantTextLengthRef.current = 0
 
-      // Append user message to local history
-      setMessages((prev) => [...prev, { role: 'user', text }])
+      const abortCtrl = new AbortController()
+      abortCtrlRef.current = abortCtrl
 
-      // Simulate an assistant response (placeholder until backend integration)
-      setTimeout(() => {
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: 'assistant',
-            text: `He recibido tu consulta como ${role === 'E' ? 'Estudiante' : 'Personal'}. La integración con el backend aún no está conectada.`,
-          },
-        ])
-      }, 600)
+      // Context guard: prune old history if prompt would exceed limit
+      const prunedHistory = pruneHistory(messagesRef.current, text)
+
+      const apiMessages = [
+        { role: 'system', content: SYSTEM_PROMPTS[role] },
+        ...prunedHistory.map((m) => ({ role: m.role, content: m.text })),
+        { role: 'user', content: text },
+      ]
+
+      let assistantMsgId = null
+
+      await streamChat({
+        messages: apiMessages,
+        onFirstToken: () => {
+          assistantMsgId = generateId()
+          setMessages((prev) => [
+            ...prev,
+            { role: 'assistant', text: '', id: assistantMsgId },
+          ])
+          setAvatarState('SPEAKING')
+        },
+        onToken: (content) => {
+          assistantTextLengthRef.current += content.length
+          setMessages((prev) => {
+            const last = prev[prev.length - 1]
+            if (last && last.role === 'assistant' && last.id === assistantMsgId) {
+              const updated = [...prev]
+              updated[updated.length - 1] = {
+                ...last,
+                text: last.text + content,
+              }
+              return updated
+            }
+            return prev
+          })
+        },
+        onDone: () => {
+          streamingRef.current = false
+          abortCtrlRef.current = null
+
+          // Delay IDLE until typewriter finishes revealing all text
+          const textLength = assistantTextLengthRef.current
+          assistantTextLengthRef.current = 0
+
+          if (textLength === 0) {
+            // Empty response → error immediately
+            setAvatarState('IDLE')
+            setMessages((prev) => {
+              const last = prev[prev.length - 1]
+              if (last && last.role === 'assistant' && !last.text) {
+                const updated = [...prev]
+                updated[updated.length - 1] = {
+                  ...last,
+                  text: 'El servidor no respondio. Intenta de nuevo.',
+                  isError: true,
+                }
+                return updated
+              }
+              return prev
+            })
+          } else {
+            const revealMs = Math.ceil(textLength / 4) * 12 + 200
+            setTimeout(() => setAvatarState('IDLE'), revealMs)
+          }
+        },
+        onError: (type, detail) => {
+          streamingRef.current = false
+          abortCtrlRef.current = null
+          setServerStatus('offline')
+          setAvatarState('ERROR')
+          const errorText = type === 'server'
+            ? `Error del servidor: ${detail || 'desconocido'}. [Reintentar]`
+            : 'No se pudo conectar. Verifica tu conexion. [Reintentar]'
+          setMessages((prev) => [
+            ...prev,
+            { role: 'assistant', text: errorText, id: generateId(), isError: true },
+          ])
+        },
+        signal: abortCtrl.signal,
+      })
     },
-    [role]
+    [role, isOnline]
   )
 
-  // ── Render ────────────────────────────────────────────
+  const handleRetry = useCallback(
+    (msgIndex) => {
+      const msgs = messagesRef.current
+      const errorMsg = msgs[msgIndex]
+      if (!errorMsg?.isError) return
+      let userIndex = msgIndex - 1
+      while (userIndex >= 0 && msgs[userIndex].role !== 'user') {
+        userIndex--
+      }
+      if (userIndex < 0) return
+      const userText = msgs[userIndex].text
+      const sliced = msgs.slice(0, msgIndex)
+      setMessages(sliced)
+      messagesRef.current = sliced
+      handleSendMessage(userText)
+    },
+    [handleSendMessage]
+  )
+
   return (
-    <div className="relative h-dvh w-full overflow-hidden flex flex-col bg-surface-900 noise-overlay font-body">
-      {/* Safe-area aware layout container */}
-      <div className="relative z-10 flex flex-col h-full">
-        {/* ── Top: Header ── */}
-        <Header selectedRole={role} onRoleChange={setRole} />
+    <div className="flex overflow-hidden relative flex-col w-full h-dvh bg-surface-900 noise-overlay font-body">
+      <div className="flex relative z-10 flex-col h-full">
+        <Header selectedRole={role} onRoleChange={setRole} serverStatus={serverStatus} />
 
-        {/* ── Center: 3D Avatar Canvas ── */}
-        <AvatarCanvas />
+        <VideoAvatar avatarState={avatarState} />
 
-        {/* ── Bottom: Chat area ── */}
+        <InstallBanner />
+
         <div className="flex flex-col max-h-[45vh] sm:max-h-[40vh] border-t border-white/[0.04] bg-surface-800/40 backdrop-blur-xl">
-          <ChatHistory messages={messages} />
-          <ChatInput onSendMessage={handleSendMessage} />
-          {/* Bottom safe-area spacer for iOS */}
+          {isOnline === false && (
+            <div className="px-4 py-1.5 bg-red-500/10 border-b border-red-500/20 text-center">
+              <p className="text-[11px] text-red-400 font-body tracking-wide">
+                Modo sin conexion — historial disponible
+              </p>
+            </div>
+          )}
+          <ChatHistory
+            messages={messages}
+            isThinking={avatarState === 'THINKING'}
+            onRetry={handleRetry}
+          />
+          <ChatInput
+            onSendMessage={handleSendMessage}
+            onStop={handleStop}
+            disabled={!isOnline || avatarState === 'THINKING' || avatarState === 'SPEAKING'}
+            isStreaming={avatarState === 'THINKING' || avatarState === 'SPEAKING'}
+            isOnline={isOnline}
+            historyTokens={(() => {
+              const total = estimateHistoryTokens(messages)
+              return total
+            })()}
+          />
           <div className="pb-[env(safe-area-inset-bottom)]" />
         </div>
       </div>

@@ -19,6 +19,9 @@ web_modules/
 dist/
 dist-ssr/
 dev-dist/
+jspm_packages
+package-lock.json
+bun.lock
 
 # Local env files
 .env

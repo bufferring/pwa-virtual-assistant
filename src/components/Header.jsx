@@ -1,12 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react'
 import unefaLogo from '../assets/unefa_logo.png'
+import { getSessionId } from '../lib/db'
 
 const ROLES = {
   E: { label: 'Estudiante', short: 'E' },
   O: { label: 'Otro Personal', short: 'O' },
 }
 
-export default function Header({ selectedRole, onRoleChange }) {
+export default function Header({ selectedRole, onRoleChange, isOnline }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
 
@@ -23,10 +24,16 @@ export default function Header({ selectedRole, onRoleChange }) {
     <header className="relative z-30 flex items-center justify-between px-5 py-3 bg-surface-800/70 backdrop-blur-xl border-b border-white/[0.04]">
       {/* Brand */}
       <div className="flex items-center gap-3">
-        {/* Accent dot */}
+        {/* Connection status dot */}
         <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
-          <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-60 animate-ping" />
-          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-accent" />
+          {isOnline ? (
+            <>
+              <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-60 animate-ping" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-accent" />
+            </>
+          ) : (
+            <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
+          )}
         </span>
         {/* UNEFA Logo */}
         <img 
@@ -35,8 +42,8 @@ export default function Header({ selectedRole, onRoleChange }) {
           className="w-7 h-7 object-contain filter drop-shadow-[0_0_4px_rgba(0,229,200,0.15)]"
         />
         <div className="flex flex-col leading-none">
-          <span className="font-display font-bold text-sm tracking-wide text-white/90 uppercase">
-            UNEFA Manager
+          <span className="font-display font-bold text-sm tracking-wide text-white/90">
+            MarIA
           </span>
           <span className="text-[10px] text-muted tracking-widest mt-0.5">
             Asistente Académico
@@ -45,7 +52,10 @@ export default function Header({ selectedRole, onRoleChange }) {
       </div>
 
       {/* Role selector */}
-      <div ref={ref} className="relative">
+      <div ref={ref} className="relative flex flex-col items-end">
+        <span className="text-[9px] text-white/20 font-body tracking-wider mb-0.5 hidden sm:block">
+          Sesion: {getSessionId().slice(0, 8)}
+        </span>
         <button
           id="role-selector-toggle"
           onClick={() => setOpen((o) => !o)}

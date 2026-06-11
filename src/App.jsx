@@ -1,76 +1,202 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect, useRef } from 'react'
 import Header from './components/Header'
 import AvatarCanvas from './components/AvatarCanvas'
 import ChatHistory from './components/ChatHistory'
 import ChatInput from './components/ChatInput'
+import InstallBanner from './components/InstallBanner'
+import { streamChat } from './lib/api'
+import { getSessionId, loadMessages, saveMessages } from './lib/db'
 
-/**
- * App — Root layout for the UNEFA Virtual Assistant PWA.
- *
- * Layout structure (top → bottom, no page scroll):
- *   ┌──────────────────────────┐
- *   │  Header / Role Selector  │  fixed height
- *   ├──────────────────────────┤
- *   │                          │
- *   │     AvatarCanvas (3D)    │  flex-1 (fills remaining)
- *   │                          │
- *   ├──────────────────────────┤
- *   │  ChatHistory (scroll)    │  constrained max-height
- *   ├──────────────────────────┤
- *   │  ChatInput               │  fixed height
- *   └──────────────────────────┘
- */
+const SYSTEM_PROMPTS = {
+  E: 'Eres LUMI, el asistente virtual academico de la UNEFA Nucleo Apure. El usuario es un estudiante. Responde de forma clara, breve y util sobre reglamentos, calendario academico, tramites y vida universitaria.',
+  O: 'Eres LUMI, el asistente virtual academico de la UNEFA Nucleo Apure. El usuario es personal docente o administrativo. Responde de forma clara, breve y util.',
+}
+
+function generateId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
 export default function App() {
-  // ── State ─────────────────────────────────────────────
-  const [role, setRole] = useState('E') // 'E' = Estudiante | 'O' = Otro Personal
+  const [role, setRole] = useState('E')
   const [messages, setMessages] = useState([])
+  const messagesRef = useRef(messages)
+  const [avatarState, setAvatarState] = useState('IDLE')
+  const [isOnline, setIsOnline] = useState(navigator.onLine)
+  const abortCtrlRef = useRef(null)
+  const streamingRef = useRef(false)
 
-  // ── Handlers ──────────────────────────────────────────
+  // Keep ref in sync with state
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
+
+  // Restore messages on mount
+  useEffect(() => {
+    loadMessages(getSessionId()).then((msgs) => {
+      if (msgs.length > 0) setMessages(msgs)
+    })
+  }, [])
+
+  // Persist messages on change
+  useEffect(() => {
+    saveMessages(getSessionId(), messages)
+  }, [messages])
+
+  // Online/offline events
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true)
+    const onOffline = () => setIsOnline(false)
+    window.addEventListener('online', onOnline)
+    window.addEventListener('offline', onOffline)
+    return () => {
+      window.removeEventListener('online', onOnline)
+      window.removeEventListener('offline', onOffline)
+    }
+  }, [])
+
+  const handleStop = useCallback(() => {
+    if (abortCtrlRef.current) {
+      abortCtrlRef.current.abort()
+      abortCtrlRef.current = null
+    }
+    streamingRef.current = false
+    setAvatarState('IDLE')
+  }, [])
+
   const handleSendMessage = useCallback(
-    (text) => {
-      // Build payload that will be sent to the backend in the future
-      const payload = {
-        mensaje: text,
-        rol: role,
-        timestamp: new Date().toISOString(),
+    async (text) => {
+      if (!isOnline) return
+
+      // Abort any existing stream
+      if (abortCtrlRef.current) {
+        abortCtrlRef.current.abort()
       }
 
-      // Log the exact JSON payload to the console
-      console.log('📤 Payload para backend:', JSON.stringify(payload, null, 2))
+      const userMsg = { role: 'user', text, id: generateId() }
+      setMessages((prev) => [...prev, userMsg])
+      setAvatarState('THINKING')
+      streamingRef.current = true
 
-      // Append user message to local history
-      setMessages((prev) => [...prev, { role: 'user', text }])
+      const abortCtrl = new AbortController()
+      abortCtrlRef.current = abortCtrl
 
-      // Simulate an assistant response (placeholder until backend integration)
-      setTimeout(() => {
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: 'assistant',
-            text: `He recibido tu consulta como ${role === 'E' ? 'Estudiante' : 'Personal'}. La integración con el backend aún no está conectada.`,
-          },
-        ])
-      }, 600)
+      const apiMessages = [
+        { role: 'system', content: SYSTEM_PROMPTS[role] },
+        ...messagesRef.current.map((m) => ({ role: m.role, content: m.text })),
+        { role: 'user', content: text },
+      ]
+
+      let assistantMsgId = null
+
+      await streamChat({
+        messages: apiMessages,
+        onFirstToken: () => {
+          assistantMsgId = generateId()
+          setMessages((prev) => [
+            ...prev,
+            { role: 'assistant', text: '', id: assistantMsgId },
+          ])
+          setAvatarState('SPEAKING')
+        },
+        onToken: (content) => {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1]
+            if (last && last.role === 'assistant' && last.id === assistantMsgId) {
+              const updated = [...prev]
+              updated[updated.length - 1] = {
+                ...last,
+                text: last.text + content,
+              }
+              return updated
+            }
+            return prev
+          })
+        },
+        onDone: () => {
+          streamingRef.current = false
+          abortCtrlRef.current = null
+          setAvatarState('IDLE')
+          // If assistant message is empty, replace with error
+          setMessages((prev) => {
+            const last = prev[prev.length - 1]
+            if (last && last.role === 'assistant' && !last.text) {
+              const updated = [...prev]
+              updated[updated.length - 1] = {
+                ...last,
+                text: 'El servidor no respondio. Intenta de nuevo.',
+                isError: true,
+              }
+              return updated
+            }
+            return prev
+          })
+        },
+        onError: (type, detail) => {
+          streamingRef.current = false
+          abortCtrlRef.current = null
+          setAvatarState('ERROR')
+          const errorText = type === 'server'
+            ? `Error del servidor: ${detail || 'desconocido'}. [Reintentar]`
+            : 'No se pudo conectar. Verifica tu conexion. [Reintentar]'
+          setMessages((prev) => [
+            ...prev,
+            { role: 'assistant', text: errorText, id: generateId(), isError: true },
+          ])
+        },
+        signal: abortCtrl.signal,
+      })
     },
-    [role]
+    [role, isOnline]
   )
 
-  // ── Render ────────────────────────────────────────────
+  const handleRetry = useCallback(
+    (msgIndex) => {
+      const msgs = messagesRef.current
+      const errorMsg = msgs[msgIndex]
+      if (!errorMsg?.isError) return
+      let userIndex = msgIndex - 1
+      while (userIndex >= 0 && msgs[userIndex].role !== 'user') {
+        userIndex--
+      }
+      if (userIndex < 0) return
+      const userText = msgs[userIndex].text
+      const sliced = msgs.slice(0, msgIndex)
+      setMessages(sliced)
+      messagesRef.current = sliced
+      handleSendMessage(userText)
+    },
+    [handleSendMessage]
+  )
+
   return (
     <div className="relative h-dvh w-full overflow-hidden flex flex-col bg-surface-900 noise-overlay font-body">
-      {/* Safe-area aware layout container */}
       <div className="relative z-10 flex flex-col h-full">
-        {/* ── Top: Header ── */}
-        <Header selectedRole={role} onRoleChange={setRole} />
+        <Header selectedRole={role} onRoleChange={setRole} isOnline={isOnline} />
 
-        {/* ── Center: 3D Avatar Canvas ── */}
-        <AvatarCanvas />
+        <AvatarCanvas avatarState={avatarState} />
 
-        {/* ── Bottom: Chat area ── */}
+        <InstallBanner />
+
         <div className="flex flex-col max-h-[45vh] sm:max-h-[40vh] border-t border-white/[0.04] bg-surface-800/40 backdrop-blur-xl">
-          <ChatHistory messages={messages} />
-          <ChatInput onSendMessage={handleSendMessage} />
-          {/* Bottom safe-area spacer for iOS */}
+          {isOnline === false && (
+            <div className="px-4 py-1.5 bg-red-500/10 border-b border-red-500/20 text-center">
+              <p className="text-[11px] text-red-400 font-body tracking-wide">
+                Modo sin conexion — historial disponible
+              </p>
+            </div>
+          )}
+          <ChatHistory
+            messages={messages}
+            isThinking={avatarState === 'THINKING'}
+            onRetry={handleRetry}
+          />
+          <ChatInput
+            onSendMessage={handleSendMessage}
+            onStop={handleStop}
+            disabled={!isOnline || avatarState === 'THINKING' || avatarState === 'SPEAKING'}
+            isStreaming={avatarState === 'THINKING' || avatarState === 'SPEAKING'}
+            isOnline={isOnline}
+          />
           <div className="pb-[env(safe-area-inset-bottom)]" />
         </div>
       </div>

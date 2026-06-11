@@ -1,38 +1,24 @@
-# UNEFA Manager — Asistente Académico Virtual (PWA)
+# MarIA — Asistente Académico Virtual (PWA)
 
-Progressive Web App del Asistente Virtual Académico dirigido a la comunidad universitaria de la **UNEFA Núcleo Apure** (estudiantes, docentes y personal administrativo).
+Progressive Web App del Asistente Virtual Académico **LUMI**, dirigido a la comunidad universitaria de la **UNEFA Núcleo Apure** (estudiantes, docentes y personal administrativo).
+
+El backend corre un servidor [llama.cpp](https://github.com/ggerganov/llama.cpp) con el modelo `gemma-3-1b-it-Q4_K_M.gguf`, expuesto mediante una API compatible con OpenAI en `https://unefa-asistente.duckdns.org/v1/chat/completions`.
 
 ---
 
 ## Arquitectura del Sistema
 
-> **Este repositorio contiene únicamente el Frontend (PWA).**
-
-El procesamiento de IA, el RAG de reglamentos, el web scraping del calendario académico y la síntesis de voz (ElevenLabs) residen en un **backend remoto (VPS)** desarrollado de forma independiente. La comunicación entre ambos sistemas se realiza mediante peticiones HTTP con payloads JSON:
-
 ```
-┌─────────────────┐         HTTP / JSON          ┌─────────────────┐
-│   PWA Frontend  │  ◄──────────────────────────► │  Backend (VPS)  │
-│   (este repo)   │                               │  IA · RAG · TTS │
-└─────────────────┘                               └─────────────────┘
-```
-
-**Payload de envío:**
-```json
-{
-  "mensaje": "¿Cuándo inician las inscripciones?",
-  "rol": "E",
-  "timestamp": "2026-06-06T04:30:00.000Z"
-}
+┌─────────────────┐     SSE (text/event-stream)    ┌──────────────────────────────┐
+│   PWA Frontend  │  ◄──────────────────────────►  │  llama.cpp server (VPS)      │
+│   (este repo)   │                                 │  gemma-3-1b-it-Q4_K_M.gguf   │
+└─────────────────┘                                 └──────────────────────────────┘
+         │                                                    │
+         ▼                                                    ▼
+   IndexedDB (historial)                              Modelo de lenguaje local
 ```
 
-**Payload de respuesta (esperado):**
-```json
-{
-  "respuesta": "Las inscripciones inician el ...",
-  "audio_url": "https://vps.example.com/audio/abc123.mp3"
-}
-```
+**Protocolo:** SSE streaming via `fetch` + `ReadableStream`. Cada token generado por el modelo se transmite al frontend en tiempo real y se renderiza progresivamente con efecto de escritura.
 
 ---
 
@@ -43,9 +29,9 @@ El procesamiento de IA, el RAG de reglamentos, el web scraping del calendario ac
 | Bundler | [Vite](https://vitejs.dev/) | ^5.2 |
 | UI | [React](https://react.dev/) | ^18.2 |
 | Estilos | [Tailwind CSS](https://tailwindcss.com/) | ^3.4 |
+| 3D | [Three.js](https://threejs.org/) + [@react-three/fiber](https://github.com/pmndrs/react-three-fiber) + [@react-three/drei](https://github.com/pmndrs/drei) | ^0.164 / ^8.16 |
 | PWA | [vite-plugin-pwa](https://vite-pwa-org.netlify.app/) | ^0.20 |
 | PostCSS | autoprefixer + postcss | ^10.4 / ^8.4 |
-| 3D (futuro) | Three.js | — |
 
 ---
 
@@ -53,28 +39,33 @@ El procesamiento de IA, el RAG de reglamentos, el web scraping del calendario ac
 
 ```
 PWA-Virtual-Assistant/
-├── index.html                  # Entry point HTML (PWA metas, iOS safe-area)
+├── index.html                  # Entry point HTML (PWA metas, iOS safe-area, fuentes)
 ├── package.json                # Dependencias y scripts
-├── vite.config.js              # Plugins: React + PWA
 ├── tailwind.config.js          # Paleta custom, fuentes, animaciones
 ├── postcss.config.js           # Pipeline de PostCSS
 ├── .gitignore
+├── bun.lock                     # Lockfile de Bun
 │
 ├── src/
-│   ├── main.jsx                # Punto de entrada de React
-│   ├── App.jsx                 # Layout principal (h-screen, sin scroll)
-│   ├── index.css               # Directivas Tailwind + resets globales
+│   ├── main.jsx                # Punto de entrada de React (StrictMode)
+│   ├── App.jsx                 # Layout principal, state machine, SSE integration
+│   ├── index.css               # Directivas Tailwind + resets + scrollbar custom + noise overlay
 │   │
 │   ├── assets/
 │   │   └── unefa_logo.png      # Logo institucional de la UNEFA
 │   │
-│   └── components/
-│       ├── Header.jsx          # Branding + selector de rol (E / O)
-│       ├── AvatarCanvas.jsx    # Placeholder para avatar 3D (Three.js)
-│       ├── ChatHistory.jsx     # Historial de mensajes con scroll interno
-│       └── ChatInput.jsx       # Input de texto + botón de enviar
+│   ├── components/
+│   │   ├── Header.jsx          # Branding + selector de rol (E / O) + indicador de conexion
+│   │   ├── AvatarCanvas.jsx    # Canvas de React Three Fiber con fallback CSS si WebGL no disponible
+│   │   ├── AvatarScene.jsx     # Avatar 3D procedural (esfera teal + anillos orbitales + particulas)
+│   │   ├── ChatHistory.jsx     # Historial con scroll, efecto de escritura, bold markdown, retry inline
+│   │   └── ChatInput.jsx       # Input de texto + boton enviar / detener
+│   │
+│   └── lib/
+│       ├── api.js              # Cliente SSE: streamChat con fetch + ReadableStream + AbortController
+│       └── db.js               # IndexedDB: getSessionId, loadMessages, saveMessages, clearSession
 │
-└── skills/                     # Directorio reservado
+└── public/                      # Activos estaticos (vacío — no se usan modelos GLB)
 ```
 
 ---
@@ -82,28 +73,74 @@ PWA-Virtual-Assistant/
 ## Componentes Principales
 
 ### `Header.jsx`
-Barra superior con el logo de la UNEFA, el nombre de la app y un **selector de rol** desplegable:
-- **E** — Estudiante
-- **O** — Otro Personal
-
-El rol seleccionado se incluye en el payload JSON que se enviará al backend.
+- Logo de la UNEFA + nombre de la app
+- **Selector de rol:** `E` (Estudiante) / `O` (Otro Personal)
+- **Indicador de conexion:** punto verde (online) / rojo (offline)
+- ID de sesion visible
 
 ### `AvatarCanvas.jsx`
-Contenedor visual reservado para la futura integración de un **avatar 3D femenino** renderizado con Three.js. Actualmente muestra un placeholder con un anillo animado.
+- Renderiza el avatar 3D con React Three Fiber
+- **Deteccion de WebGL:** si no disponible, muestra fallback CSS con anillos animados
+- `<Suspense>` con `LoadingAvatar` mientras carga
+
+### `AvatarScene.jsx`
+- **Avatar procedural:** esfera teal emisiva con:
+  - 3 anillos orbitales a distintos angulos (rotan a velocidad variable segun estado)
+  - Brillo ambiental (glow shell)
+  - Reflejo en suelo (disc)
+  - Highlight superficial para dimension
+- **Maquina de estados animada:** `IDLE` (respiracion lenta) → `THINKING` (pulso rapido + anillos veloces) → `SPEAKING` (pulso medio) → `ERROR` (tenue, color apagado)
+- Transiciones suaves via `lerp` en cada frame
 
 ### `ChatHistory.jsx`
-Área con scroll interno que muestra el historial de conversación. Diferencia visualmente los mensajes del usuario y del asistente con burbujas estilizadas.
+- Scroll automatico sincrono (`requestAnimationFrame` + `scrollTop`)
+- **Efecto de escritura:** ultimo mensaje del asistente se revela progresivamente (~330 chars/sec) mientras streaming esta activo
+- **Markdown bold:** `**texto**` se renderiza como `<strong>`
+- **Mensajes de error:** con boton `Reintentar` inline
+- **Indicador de pensando:** 3 dots animados (`animate-bounce`)
 
 ### `ChatInput.jsx`
-Formulario anclado al fondo de la pantalla con un campo de texto y un botón de envío. Imprime por consola el JSON del payload al enviar.
+- Input con placeholder dinamico (online/offline)
+- Boton **enviar** (teal) cuando ocioso, boton **detener** (rojo) durante streaming
+- Badge "Sin conexion" cuando offline
+
+---
+
+## Flujo de Datos
+
+```
+Usuario escribe → handleSendMessage (App.jsx)
+  ↓
+Guarda mensaje user en estado + IndexedDB
+  ↓
+Construye payload [system, historial, user] → streamChat (api.js)
+  ↓
+POST SSE a llama.cpp → recibe tokens via ReadableStream
+  ↓
+onFirstToken: crea mensaje assistant vacio + avatarState = SPEAKING
+  ↓
+onToken: concatena token al mensaje assistant (efecto escritura activo)
+  ↓
+onDone: avatarState = IDLE + verifica mensaje vacio (convierte a error si aplica)
+  ↓
+onError: avatarState = ERROR + mensaje de error con [Reintentar]
+```
+
+---
+
+## Persistencia
+
+- **Session ID:** UUID generado via `crypto.randomUUID()`, almacenado en `localStorage`
+- **Mensajes:** Array completo de conversaciones guardado en IndexedDB (`LumiDB` → `conversations`) bajo la clave `sessionId`
+- **Restauracion:** al montar la app, carga mensajes previos automaticamente
+- **Limpieza:** funcion `clearSession(sessionId)` disponible en `db.js`
 
 ---
 
 ## Instalación y Desarrollo
 
 ### Requisitos previos
-- [Node.js](https://nodejs.org/) >= 18.x
-- npm >= 9.x
+- [Bun](https://bun.sh/) >= 1.0 (recomendado) o Node.js >= 18.x
 
 ### Pasos
 
@@ -113,10 +150,10 @@ git clone https://github.com/<tu-usuario>/PWA-Virtual-Assistant.git
 cd PWA-Virtual-Assistant
 
 # 2. Instalar dependencias
-npm install
+bun install
 
 # 3. Iniciar servidor de desarrollo
-npm run dev
+bun run dev
 ```
 
 La app estará disponible en `http://localhost:5173`.
@@ -124,8 +161,8 @@ La app estará disponible en `http://localhost:5173`.
 ### Build de producción
 
 ```bash
-npm run build
-npm run preview   # Previsualizar el build localmente
+bun run build
+bun run preview   # Previsualizar el build localmente
 ```
 
 Los archivos generados se encuentran en la carpeta `dist/`.
@@ -138,22 +175,26 @@ La interfaz sigue una dirección de diseño **dark cinematic / command-center**:
 
 - **Paleta:** Fondos de obsidiana profundo (`#0a0e1a` → `#1e253c`) con acento eléctrico teal (`#00e5c8`).
 - **Tipografía:** [Syne](https://fonts.google.com/specimen/Syne) (display) + [Outfit](https://fonts.google.com/specimen/Outfit) (body).
-- **Efectos:** Glassmorphism con `backdrop-blur`, textura de ruido sutil, anillo cónico pulsante en el avatar, micro-animaciones de entrada.
-- **Layout:** Mobile-first, `h-screen` sin scroll de página, compatible con iOS safe-area (`viewport-fit=cover`).
+- **Efectos:** Glassmorphism con `backdrop-blur`, textura de ruido sutil (`noise-overlay`), anillos orbitales pulsantes en el avatar, micro-animaciones de entrada.
+- **Layout:** Mobile-first, `h-dvh` sin scroll de pagina, compatible con iOS safe-area (`viewport-fit=cover`).
 
 ---
 
 ## Roadmap
 
-- [x] Scaffolding del proyecto (Vite + React + Tailwind + PWA)
+- [x] Scaffolding del proyecto (Vite + React + Tailwind)
 - [x] Layout principal mobile-first sin scroll
 - [x] Selector de rol (Estudiante / Otro Personal)
-- [x] Área de chat con historial y input
-- [x] Placeholder para avatar 3D
-- [ ] Integración con backend (peticiones HTTP)
-- [ ] Renderizado del avatar 3D con Three.js
-- [ ] Reproducción de audio (respuesta TTS de ElevenLabs)
-- [ ] Service Worker y caché offline
+- [x] Chat con historial, input y scroll interno
+- [x] Avatar 3D procedural con Three.js (esfera + anillos + animaciones)
+- [x] Integracion con backend via SSE streaming
+- [x] Efecto de escritura progresiva
+- [x] Markdown bold en respuestas
+- [x] Persistencia de sesion con IndexedDB
+- [x] Deteccion online/offline + estados de error + retry
+- [x] AbortController para detener streaming
+- [ ] Service Worker y cache offline (PWA completa)
+- [ ] Síntesis de voz (TTS) para respuestas
 - [ ] Deploy de la PWA
 
 ---

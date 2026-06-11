@@ -1,7 +1,7 @@
-const DB_NAME = 'LumiDB'
+const DB_NAME = 'MariaDB'
 const DB_VERSION = 1
 const STORE_NAME = 'conversations'
-const SESSION_KEY = 'lumi_session_id'
+const SESSION_KEY = 'maria_session_id'
 
 function openDB() {
   return new Promise((resolve, reject) => {

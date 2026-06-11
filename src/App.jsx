@@ -4,12 +4,12 @@ import VideoAvatar from './components/VideoAvatar'
 import ChatHistory from './components/ChatHistory'
 import ChatInput from './components/ChatInput'
 import InstallBanner from './components/InstallBanner'
-import { streamChat } from './lib/api'
+import { streamChat, estimateHistoryTokens, pruneHistory, API_URL } from './lib/api'
 import { getSessionId, loadMessages, saveMessages } from './lib/db'
 
 const SYSTEM_PROMPTS = {
-  E: 'Eres LUMI, el asistente virtual academico de la UNEFA Nucleo Apure. El usuario es un estudiante. Responde de forma clara, breve y util sobre reglamentos, calendario academico, tramites y vida universitaria.',
-  O: 'Eres LUMI, el asistente virtual academico de la UNEFA Nucleo Apure. El usuario es personal docente o administrativo. Responde de forma clara, breve y util.',
+  E: 'Eres MarIA, el asistente virtual academico de la UNEFA Nucleo Apure. El usuario es un estudiante. Responde de forma clara, breve y util sobre reglamentos, calendario academico, tramites y vida universitaria.',
+  O: 'Eres MarIA, el asistente virtual academico de la UNEFA Nucleo Apure. El usuario es personal docente o administrativo. Responde de forma clara, breve y util.',
 }
 
 function generateId() {
@@ -22,6 +22,7 @@ export default function App() {
   const messagesRef = useRef(messages)
   const [avatarState, setAvatarState] = useState('IDLE')
   const [isOnline, setIsOnline] = useState(navigator.onLine)
+  const [serverStatus, setServerStatus] = useState('unknown')
   const abortCtrlRef = useRef(null)
   const streamingRef = useRef(false)
   const assistantTextLengthRef = useRef(0)
@@ -55,6 +56,28 @@ export default function App() {
     }
   }, [])
 
+  // Server health polling
+  useEffect(() => {
+    const checkServer = async () => {
+      const ctrl = new AbortController()
+      const t = setTimeout(() => ctrl.abort(), 8000)
+      const start = performance.now()
+      try {
+        await fetch(API_URL, { method: 'GET', signal: ctrl.signal })
+        clearTimeout(t)
+        const elapsed = performance.now() - start
+        if (elapsed < 3000) setServerStatus('online')
+        else setServerStatus('slow')
+      } catch {
+        clearTimeout(t)
+        setServerStatus('offline')
+      }
+    }
+    checkServer()
+    const id = setInterval(checkServer, 15000)
+    return () => clearInterval(id)
+  }, [])
+
   const handleStop = useCallback(() => {
     if (abortCtrlRef.current) {
       abortCtrlRef.current.abort()
@@ -67,7 +90,7 @@ export default function App() {
 
   const handleSendMessage = useCallback(
     async (text) => {
-      if (!isOnline) return
+      if (!isOnline || serverStatus === 'offline') return
 
       // Abort any existing stream
       if (abortCtrlRef.current) {
@@ -83,9 +106,12 @@ export default function App() {
       const abortCtrl = new AbortController()
       abortCtrlRef.current = abortCtrl
 
+      // Context guard: prune old history if prompt would exceed limit
+      const prunedHistory = pruneHistory(messagesRef.current, text)
+
       const apiMessages = [
         { role: 'system', content: SYSTEM_PROMPTS[role] },
-        ...messagesRef.current.map((m) => ({ role: m.role, content: m.text })),
+        ...prunedHistory.map((m) => ({ role: m.role, content: m.text })),
         { role: 'user', content: text },
       ]
 
@@ -148,6 +174,7 @@ export default function App() {
         onError: (type, detail) => {
           streamingRef.current = false
           abortCtrlRef.current = null
+          setServerStatus('offline')
           setAvatarState('ERROR')
           const errorText = type === 'server'
             ? `Error del servidor: ${detail || 'desconocido'}. [Reintentar]`
@@ -185,7 +212,7 @@ export default function App() {
   return (
     <div className="flex overflow-hidden relative flex-col w-full h-dvh bg-surface-900 noise-overlay font-body">
       <div className="flex relative z-10 flex-col h-full">
-        <Header selectedRole={role} onRoleChange={setRole} isOnline={isOnline} />
+        <Header selectedRole={role} onRoleChange={setRole} serverStatus={serverStatus} />
 
         <VideoAvatar avatarState={avatarState} />
 
@@ -210,6 +237,10 @@ export default function App() {
             disabled={!isOnline || avatarState === 'THINKING' || avatarState === 'SPEAKING'}
             isStreaming={avatarState === 'THINKING' || avatarState === 'SPEAKING'}
             isOnline={isOnline}
+            historyTokens={(() => {
+              const total = estimateHistoryTokens(messages)
+              return total
+            })()}
           />
           <div className="pb-[env(safe-area-inset-bottom)]" />
         </div>

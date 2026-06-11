@@ -15,8 +15,8 @@ export default function VideoAvatar({ avatarState = 'IDLE' }) {
     const video = videoRef.current
     if (!video) return
 
-    const isActive = avatarState === 'THINKING' || avatarState === 'SPEAKING'
-    const wasActive = prevStateRef.current === 'THINKING' || prevStateRef.current === 'SPEAKING'
+    const isActive = avatarState === 'SPEAKING'
+    const wasActive = prevStateRef.current === 'SPEAKING'
 
     if (isActive && !wasActive) {
       video.play().catch(() => {})

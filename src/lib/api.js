@@ -4,18 +4,25 @@ export async function streamChat({ messages, onToken, onFirstToken, onDone, onEr
   let finished = false
   let firstToken = true
   let tokenCount = 0
+  let finishReason = null
 
   const processLine = (line) => {
     if (!line.startsWith('data: ')) return
     const data = line.slice(6).trim()
     if (data === '[DONE]') {
       finished = true
+      console.log('[SSE] done | tokens:', tokenCount, '| finish_reason:', finishReason || 'none')
       onDone()
       return
     }
     try {
       const chunk = JSON.parse(data)
       const content = chunk.choices?.[0]?.delta?.content
+      const reason = chunk.choices?.[0]?.finish_reason
+      if (reason) {
+        finishReason = reason
+        console.log('[SSE] finish_reason:', reason)
+      }
       if (typeof content === 'string') {
         if (firstToken) {
           onFirstToken()
@@ -40,6 +47,7 @@ export async function streamChat({ messages, onToken, onFirstToken, onDone, onEr
         model: 'gemma-3-1b-it-Q4_K_M.gguf',
         messages,
         stream: true,
+        max_tokens: 2048,
       }),
       signal,
     })
@@ -57,7 +65,6 @@ export async function streamChat({ messages, onToken, onFirstToken, onDone, onEr
       const { done, value } = await reader.read()
 
       if (done) {
-        // Flush decoder internal buffer and process any remaining lines
         buffer += decoder.decode()
         if (buffer) {
           const lines = buffer.split('\n')
@@ -80,11 +87,8 @@ export async function streamChat({ messages, onToken, onFirstToken, onDone, onEr
     }
 
     if (!finished) {
+      console.log('[SSE] ended without [DONE] | tokens:', tokenCount)
       onDone()
-    }
-
-    if (tokenCount === 0 && !finished) {
-      onToken('')
     }
   } catch (err) {
     if (err.name === 'AbortError') {

@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import Header from './components/Header'
-import AvatarCanvas from './components/AvatarCanvas'
+import VideoAvatar from './components/VideoAvatar'
 import ChatHistory from './components/ChatHistory'
 import ChatInput from './components/ChatInput'
 import InstallBanner from './components/InstallBanner'
@@ -24,6 +24,7 @@ export default function App() {
   const [isOnline, setIsOnline] = useState(navigator.onLine)
   const abortCtrlRef = useRef(null)
   const streamingRef = useRef(false)
+  const assistantTextLengthRef = useRef(0)
 
   // Keep ref in sync with state
   useEffect(() => {
@@ -60,6 +61,7 @@ export default function App() {
       abortCtrlRef.current = null
     }
     streamingRef.current = false
+    assistantTextLengthRef.current = 0
     setAvatarState('IDLE')
   }, [])
 
@@ -76,6 +78,7 @@ export default function App() {
       setMessages((prev) => [...prev, userMsg])
       setAvatarState('THINKING')
       streamingRef.current = true
+      assistantTextLengthRef.current = 0
 
       const abortCtrl = new AbortController()
       abortCtrlRef.current = abortCtrl
@@ -99,6 +102,7 @@ export default function App() {
           setAvatarState('SPEAKING')
         },
         onToken: (content) => {
+          assistantTextLengthRef.current += content.length
           setMessages((prev) => {
             const last = prev[prev.length - 1]
             if (last && last.role === 'assistant' && last.id === assistantMsgId) {
@@ -115,21 +119,31 @@ export default function App() {
         onDone: () => {
           streamingRef.current = false
           abortCtrlRef.current = null
-          setAvatarState('IDLE')
-          // If assistant message is empty, replace with error
-          setMessages((prev) => {
-            const last = prev[prev.length - 1]
-            if (last && last.role === 'assistant' && !last.text) {
-              const updated = [...prev]
-              updated[updated.length - 1] = {
-                ...last,
-                text: 'El servidor no respondio. Intenta de nuevo.',
-                isError: true,
+
+          // Delay IDLE until typewriter finishes revealing all text
+          const textLength = assistantTextLengthRef.current
+          assistantTextLengthRef.current = 0
+
+          if (textLength === 0) {
+            // Empty response → error immediately
+            setAvatarState('IDLE')
+            setMessages((prev) => {
+              const last = prev[prev.length - 1]
+              if (last && last.role === 'assistant' && !last.text) {
+                const updated = [...prev]
+                updated[updated.length - 1] = {
+                  ...last,
+                  text: 'El servidor no respondio. Intenta de nuevo.',
+                  isError: true,
+                }
+                return updated
               }
-              return updated
-            }
-            return prev
-          })
+              return prev
+            })
+          } else {
+            const revealMs = Math.ceil(textLength / 4) * 12 + 200
+            setTimeout(() => setAvatarState('IDLE'), revealMs)
+          }
         },
         onError: (type, detail) => {
           streamingRef.current = false
@@ -169,11 +183,11 @@ export default function App() {
   )
 
   return (
-    <div className="relative h-dvh w-full overflow-hidden flex flex-col bg-surface-900 noise-overlay font-body">
-      <div className="relative z-10 flex flex-col h-full">
+    <div className="flex overflow-hidden relative flex-col w-full h-dvh bg-surface-900 noise-overlay font-body">
+      <div className="flex relative z-10 flex-col h-full">
         <Header selectedRole={role} onRoleChange={setRole} isOnline={isOnline} />
 
-        <AvatarCanvas avatarState={avatarState} />
+        <VideoAvatar avatarState={avatarState} />
 
         <InstallBanner />
 

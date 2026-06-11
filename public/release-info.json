@@ -1,5 +1,5 @@
 {
-  "version": "2.1.0",
-  "note": "Mejoras en la UI, respuesta fragmentada, PWA-capabilities mejoradas, avatar animado on-response",
-  "date": "2026-06-11T01:27:26.124Z"
+  "version": "3.0.0",
+  "note": "Avatar animado basado en video con length context optimizado para textos largos",
+  "date": "2026-06-11T03:20:13.761Z"
 }

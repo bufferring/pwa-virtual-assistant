@@ -4,8 +4,9 @@ import VideoAvatar from './components/VideoAvatar'
 import ChatHistory from './components/ChatHistory'
 import ChatInput from './components/ChatInput'
 import InstallBanner from './components/InstallBanner'
-import { streamChat, estimateHistoryTokens, pruneHistory, API_URL } from './lib/api'
+import { streamChat, estimateHistoryTokens, pruneHistory, API_URL, API_HEALTH_URL } from './lib/api'
 import { getSessionId, loadMessages, saveMessages } from './lib/db'
+import { speak, cancel as cancelTTS, resetProgress, getOffset, isSupported } from './lib/tts'
 
 const SYSTEM_PROMPTS = {
   E: 'Eres MarIA, el asistente virtual academico de la UNEFA Nucleo Apure. El usuario es un estudiante. Responde de forma clara, breve y util sobre reglamentos, calendario academico, tramites y vida universitaria.',
@@ -23,14 +24,31 @@ export default function App() {
   const [avatarState, setAvatarState] = useState('IDLE')
   const [isOnline, setIsOnline] = useState(navigator.onLine)
   const [serverStatus, setServerStatus] = useState('unknown')
+  const [lastAssistantText, setLastAssistantText] = useState('')
+  const lastAssistantTextRef = useRef('')
   const abortCtrlRef = useRef(null)
   const streamingRef = useRef(false)
   const assistantTextLengthRef = useRef(0)
+  const [speakingId, setSpeakingId] = useState(null)
+  const speakingIdRef = useRef(null)
 
   // Keep ref in sync with state
   useEffect(() => {
     messagesRef.current = messages
   }, [messages])
+
+  useEffect(() => {
+    speakingIdRef.current = speakingId
+  }, [speakingId])
+
+  // Avatar state driven by TTS: SPEAKING while any audio plays, IDLE when done
+  useEffect(() => {
+    if (speakingId) {
+      setAvatarState('SPEAKING')
+    } else if (!streamingRef.current) {
+      setAvatarState('IDLE')
+    }
+  }, [speakingId])
 
   // Restore messages on mount
   useEffect(() => {
@@ -63,7 +81,7 @@ export default function App() {
       const t = setTimeout(() => ctrl.abort(), 8000)
       const start = performance.now()
       try {
-        await fetch(API_URL, { method: 'GET', signal: ctrl.signal })
+        await fetch(API_HEALTH_URL, { method: 'GET', signal: ctrl.signal })
         clearTimeout(t)
         const elapsed = performance.now() - start
         if (elapsed < 3000) setServerStatus('online')
@@ -85,8 +103,50 @@ export default function App() {
     }
     streamingRef.current = false
     assistantTextLengthRef.current = 0
+    if (speakingIdRef.current) {
+      cancelTTS()
+      resetProgress(speakingIdRef.current)
+      speakingIdRef.current = null
+      setSpeakingId(null)
+    }
     setAvatarState('IDLE')
   }, [])
+
+  const speakById = useCallback((id, text, offset = 0) => {
+    if (!text || !isSupported()) return
+    speak(id, text, {
+      offset,
+      onStart: () => {
+        speakingIdRef.current = id
+        setSpeakingId(id)
+      },
+      onEnd: () => {
+        speakingIdRef.current = null
+        setSpeakingId(null)
+      },
+      onError: () => {
+        speakingIdRef.current = null
+        setSpeakingId(null)
+      },
+    })
+  }, [])
+
+  const toggleSpeak = useCallback((id, text) => {
+    const current = speakingIdRef.current
+    if (current === id) {
+      cancelTTS()
+      return
+    }
+    if (current) {
+      cancelTTS()
+      resetProgress(current)
+      speakingIdRef.current = null
+      setSpeakingId(null)
+      setTimeout(() => speakById(id, text, getOffset(id)), 0)
+      return
+    }
+    speakById(id, text, getOffset(id))
+  }, [speakById])
 
   const handleSendMessage = useCallback(
     async (text) => {
@@ -99,6 +159,17 @@ export default function App() {
 
       const userMsg = { role: 'user', text, id: generateId() }
       setMessages((prev) => [...prev, userMsg])
+      setLastAssistantText('')
+      lastAssistantTextRef.current = ''
+
+      // Cancel any active TTS before starting new stream
+      if (speakingIdRef.current) {
+        cancelTTS()
+        resetProgress(speakingIdRef.current)
+        speakingIdRef.current = null
+        setSpeakingId(null)
+      }
+
       setAvatarState('THINKING')
       streamingRef.current = true
       assistantTextLengthRef.current = 0
@@ -129,6 +200,7 @@ export default function App() {
         },
         onToken: (content) => {
           assistantTextLengthRef.current += content.length
+          lastAssistantTextRef.current += content
           setMessages((prev) => {
             const last = prev[prev.length - 1]
             if (last && last.role === 'assistant' && last.id === assistantMsgId) {
@@ -146,13 +218,13 @@ export default function App() {
           streamingRef.current = false
           abortCtrlRef.current = null
 
-          // Delay IDLE until typewriter finishes revealing all text
           const textLength = assistantTextLengthRef.current
           assistantTextLengthRef.current = 0
 
           if (textLength === 0) {
             // Empty response → error immediately
             setAvatarState('IDLE')
+            setLastAssistantText('')
             setMessages((prev) => {
               const last = prev[prev.length - 1]
               if (last && last.role === 'assistant' && !last.text) {
@@ -167,13 +239,27 @@ export default function App() {
               return prev
             })
           } else {
-            const revealMs = Math.ceil(textLength / 4) * 12 + 200
-            setTimeout(() => setAvatarState('IDLE'), revealMs)
+            const finalText = lastAssistantTextRef.current
+            if (finalText) {
+              setLastAssistantText(finalText)
+              speakById(assistantMsgId, finalText, 0)
+            }
+            lastAssistantTextRef.current = ''
+            // Fallback for browsers without TTS: transition to IDLE after typewriter
+            if (!isSupported()) {
+              const revealMs = Math.ceil(textLength / 4) * 12 + 200
+              setTimeout(() => {
+                if (!streamingRef.current && !speakingIdRef.current) {
+                  setAvatarState('IDLE')
+                }
+              }, revealMs)
+            }
           }
         },
         onError: (type, detail) => {
           streamingRef.current = false
           abortCtrlRef.current = null
+          setLastAssistantText('')
           setServerStatus('offline')
           setAvatarState('ERROR')
           const errorText = type === 'server'
@@ -214,7 +300,12 @@ export default function App() {
       <div className="flex relative z-10 flex-col h-full">
         <Header selectedRole={role} onRoleChange={setRole} serverStatus={serverStatus} />
 
-        <VideoAvatar avatarState={avatarState} />
+        <VideoAvatar
+          avatarState={avatarState}
+          lastAssistantText={lastAssistantText}
+          speakingId={speakingId}
+          onToggleSpeak={toggleSpeak}
+        />
 
         <InstallBanner />
 
@@ -230,11 +321,13 @@ export default function App() {
             messages={messages}
             isThinking={avatarState === 'THINKING'}
             onRetry={handleRetry}
+            speakingId={speakingId}
+            onToggleSpeak={toggleSpeak}
           />
           <ChatInput
             onSendMessage={handleSendMessage}
             onStop={handleStop}
-            disabled={!isOnline || avatarState === 'THINKING' || avatarState === 'SPEAKING'}
+            disabled={!isOnline || avatarState === 'THINKING'}
             isStreaming={avatarState === 'THINKING' || avatarState === 'SPEAKING'}
             isOnline={isOnline}
             historyTokens={(() => {

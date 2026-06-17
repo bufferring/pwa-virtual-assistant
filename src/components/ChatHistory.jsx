@@ -36,7 +36,7 @@ function TypewriterText({ text, isActive }) {
   return <>{renderMarkdown(displayed)}</>
 }
 
-export default function ChatHistory({ messages, isThinking, onRetry }) {
+export default function ChatHistory({ messages, isThinking, onRetry, speakingId, onToggleSpeak }) {
   const containerRef = useRef(null)
   const bottomRef = useRef(null)
 
@@ -107,6 +107,39 @@ export default function ChatHistory({ messages, isThinking, onRetry }) {
                 <TypewriterText text={msg.text} isActive={isActiveStreaming} />
               ) : (
                 msg.text
+              )}
+
+              {/* Per-message TTS play/stop button */}
+              {msg.role === 'assistant' && !msg.isError && msg.text && onToggleSpeak && (
+                <div className="flex justify-end mt-1">
+                  <button
+                    onClick={() => onToggleSpeak(msg.id, msg.text)}
+                    className={`flex items-center gap-1 text-[10px] font-body tracking-wide transition-all duration-200 cursor-pointer active:scale-90
+                      ${speakingId === msg.id
+                        ? 'text-accent animate-pulse'
+                        : 'text-white/30 hover:text-accent/80'
+                      }`}
+                    aria-label={speakingId === msg.id ? 'Detener audio' : 'Escuchar mensaje'}
+                    title={speakingId === msg.id ? 'Detener' : 'Escuchar'}
+                  >
+                    {speakingId === msg.id ? (
+                      <>
+                        <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                          <rect x="6" y="6" width="12" height="12" rx="2" />
+                        </svg>
+                        <span>Detener</span>
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                          <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                        </svg>
+                        <span>Escuchar</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               )}
             </div>
           </div>

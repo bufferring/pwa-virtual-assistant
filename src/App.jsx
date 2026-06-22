@@ -181,7 +181,6 @@ export default function App() {
       const prunedHistory = pruneHistory(messagesRef.current, text)
 
       const apiMessages = [
-        { role: 'system', content: SYSTEM_PROMPTS[role] },
         ...prunedHistory.map((m) => ({ role: m.role, content: m.text })),
         { role: 'user', content: text },
       ]
@@ -295,10 +294,50 @@ export default function App() {
     [handleSendMessage]
   )
 
+  const handleClearChat = useCallback(async () => {
+    // Cancelar cualquier streaming en curso
+    if (abortCtrlRef.current) {
+      abortCtrlRef.current.abort()
+      abortCtrlRef.current = null
+    }
+    streamingRef.current = false
+
+    // Cancelar TTS si está hablando
+    if (speakingIdRef.current) {
+      cancelTTS()
+      resetProgress(speakingIdRef.current)
+      speakingIdRef.current = null
+      setSpeakingId(null)
+    }
+
+    // Limpiar estado local
+    setMessages([])
+    messagesRef.current = []
+    lastAssistantTextRef.current = ''
+    assistantTextLengthRef.current = 0
+    setLastAssistantText('')
+    setAvatarState('IDLE')
+
+    // Limpiar IndexedDB
+    try {
+      const sessionId = getSessionId()
+      const { clearSession } = await import('./lib/db')
+      await clearSession(sessionId)
+      console.log('[App] Chat cleared')
+    } catch (err) {
+      console.error('[App] Error clearing session:', err)
+    }
+  }, [])
+
   return (
     <div className="flex overflow-hidden relative flex-col w-full h-dvh bg-surface-900 noise-overlay font-body">
       <div className="flex relative z-10 flex-col h-full">
-        <Header selectedRole={role} onRoleChange={setRole} serverStatus={serverStatus} />
+        <Header
+          selectedRole={role}
+          onRoleChange={setRole}
+          serverStatus={serverStatus}
+          onClearChat={handleClearChat}
+        />
 
         <VideoAvatar
           avatarState={avatarState}
